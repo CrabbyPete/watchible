@@ -27,6 +27,7 @@ psm_eint = machine.Pin(15, machine.Pin.OUT, machine.Pin.PULL_UP)
 alarm_set = False
 last_alarm = None
 done = False
+battery = None
 
 
 def now():
@@ -108,7 +109,6 @@ class BC66:
                     debug.write("error decoding line {}\r\n".format(str(e)))
                     continue
 
-                
                 # If we got a line of code process it
                 if line:
                     debug.write(line)
@@ -132,6 +132,8 @@ class BC66:
         :param line:
         :return:
         """
+        global battery
+        
         new_line = line.replace('\r', '').replace('\n', '')
 
         try:
@@ -184,13 +186,17 @@ class BC66:
             result = result.split(',')
             line = result[3]
             debug.write(line)
-        '''
+
+        # +CBC: 0,0,3275 Battery level 
+        elif "CBC" in command:
+            result = result.split(',')
+            battery = result[2]
+
         elif "QNBIOT" in command:
            pass
         
         elif "QCFG" in command:
            pass
-        '''
 
     def send_at(self, command):
         """
@@ -214,7 +220,6 @@ class BC66:
 
         while not done:
             time.sleep(.1)
-             
 
     @property
     def state(self):
@@ -237,7 +242,7 @@ def mqtt(bc66):
     :param bc66:
     :return:
     """
-    global alarm_set
+    global alarm_set, battery
 
     bc66.send_at('AT+QMTOPEN=0,"broker.hivemq.com",1883')
     while not bc66.state in (MQTTOPEN, MQTTFAIL):
@@ -256,6 +261,7 @@ def mqtt(bc66):
         msg = json.dumps({'ccid': bc66.ccid,
                           'alarm': alarm_set,
                           'temperature':temperature(),
+                          'volts':battery,
                           'timestamp': now()})
         bc66.send_at('AT+QMTPUB=0,0,0,0,"device/state","{}"'.format(msg))
 
@@ -283,8 +289,8 @@ def main():
 
         bc66.send_at('AT+CPSMS=1,,,"00100001","00100001"')
         bc66.send_at('AT+CEREG?')
-        # bc66.send_at('AT+QSCLK?')
-        # bc66.send_at('AT+CBC')
+        bc66.send_at('AT+QSCLK?')
+        bc66.send_at('AT+CBC')
         bc66.send_at('AT+CGDCONT?')
 
         mqtt(bc66)
