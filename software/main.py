@@ -3,7 +3,7 @@ import json
 import utime
 import machine
 import _thread
-
+import picosleep
 
 RESET = 0
 READY = 1
@@ -108,7 +108,7 @@ class BC66:
                     debug.write("error decoding line {}\r\n".format(str(e)))
                     continue
 
-
+                
                 # If we got a line of code process it
                 if line:
                     debug.write(line)
@@ -117,9 +117,9 @@ class BC66:
                         self.handle_state(line)
                     else:
                         if 'OK' in line or \
-                                'ERROR' in line or \
-                                'BROM' in line:
-
+                           'ERROR' in line or \
+                           'BROM' in line:
+                           
                             with lock:
                                 done = True
 
@@ -137,9 +137,8 @@ class BC66:
         try:
             command, result = new_line.split(':', 1)
         except ValueError:
-            debug.write(f"ValueError {line}\r\n")
+            debug.write(f"ValueError {line} \r\n")
             return
-
 
         if "CEREG" in command:
             result = result.split(',')
@@ -184,12 +183,11 @@ class BC66:
         elif "QMTRECV" in command:
             result = result.split(',')
             line = result[3]
-            pass
-
+            debug.write(line)
         '''
         elif "QNBIOT" in command:
            pass
- 
+        
         elif "QCFG" in command:
            pass
         '''
@@ -201,10 +199,10 @@ class BC66:
         :return:
         """
         global done
-
+        
         with lock:
             done = False
-
+        
         #debug.write(f"sending {command}\r\n")
         command += '\r'
         command = bytes(command, 'utf-8')
@@ -216,7 +214,7 @@ class BC66:
 
         while not done:
             time.sleep(.1)
-
+             
 
     @property
     def state(self):
@@ -225,7 +223,13 @@ class BC66:
     @state.setter
     def state(self, value):
         self.status = value
-
+        
+        
+def temperature():
+    adc = machine.ADC(4) 
+    adc_voltage = adc.read_u16() * (3.3 / (65535))
+    return str(27 - (adc_voltage - 0.706)/0.001721)
+    
 
 def mqtt(bc66):
     """
@@ -239,35 +243,35 @@ def mqtt(bc66):
     while not bc66.state in (MQTTOPEN, MQTTFAIL):
         utime.sleep(1)
 
-    if bc66.state == MQTTFAIL:
-        return
-
-    bc66.send_at('AT+QMTCONN=0,"petes-alfa-kit"')
-    while not bc66.state in (MQTTCONNECTED, MQTTFAIL):
-        utime.sleep(1)
+    if not bc66.state == MQTTFAIL:
+        bc66.send_at('AT+QMTCONN=0,"petes-alfa-kit"')
+        while not bc66.state in (MQTTCONNECTED, MQTTFAIL):
+            utime.sleep(1)
 
     if bc66.state == MQTTCONNECTED:
 
         bc66.send_at('AT+QMTSUB=0,1,"device/status",0')
+        temp = temperature()
 
-        msg = json.dumps({'ccid': bc66.ccid, 'alarm': alarm_set, 'timestamp': now()})
+        msg = json.dumps({'ccid': bc66.ccid,
+                          'alarm': alarm_set,
+                          'temperature':temperature(),
+                          'timestamp': now()})
         bc66.send_at('AT+QMTPUB=0,0,0,0,"device/state","{}"'.format(msg))
 
-    utime.sleep(1)
     bc66.send_at('AT+QMTCLOSE=0')
 
 
 def main():
     global done
-
+    
     debug.write("Ready\r\n")
 
     with lock:
         done = False
-
+        
     bc66 = BC66()
     time.sleep(2)
-
 
     while True:
         # bc66.send_at("ATI")
@@ -280,7 +284,7 @@ def main():
         bc66.send_at('AT+CPSMS=1,,,"00100001","00100001"')
         bc66.send_at('AT+CEREG?')
         # bc66.send_at('AT+QSCLK?')
-        bc66.send_at('AT+CBC')      # Query power
+        # bc66.send_at('AT+CBC')
         bc66.send_at('AT+CGDCONT?')
 
         mqtt(bc66)
@@ -288,13 +292,14 @@ def main():
         # The BROM will reset the code
         with lock:
             done = False
-
+        
         while True:
             with lock:
                 if done:
                     break
-            time.sleep(1)
+            time.sleep(2)
 
 
 if __name__ == "__main__":
     main()
+
