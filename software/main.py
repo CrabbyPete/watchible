@@ -3,7 +3,7 @@ import json
 import utime
 import machine
 import _thread
-import picosleep
+
 
 RESET = 0
 READY = 1
