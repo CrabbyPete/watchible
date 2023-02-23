@@ -14,8 +14,8 @@ MQTTFAIL = 10
 
 lock = _thread.allocate_lock()
 
-modem = machine.UART(0, 115200)
-debug = machine.UART(1, 115200)
+modem = machine.UART(1, 115200)
+#debug = machine.UART(0, 115200)
 
 # These pin are defined on the Watchible board
 water_alarm = machine.Pin(2, machine.Pin.IN, machine.Pin.PULL_UP)
@@ -49,7 +49,7 @@ def callback(p):
     now = time.time()
     # Check to see it the alarm has gone off already in the last hour
     if not last_alarm or now - last_alarm > 3600:
-        debug.write('Alarm\r\n')
+        print('Alarm')
         alarm_set = True
 
         # Trigger the modem to wake up
@@ -100,18 +100,18 @@ class BC66:
                 try:
                     line = modem.readline()
                 except Exception as e:
-                    debug.write("error reading uart {}\r\n".format(str(e)))
+                    print("error reading uart {}".format(str(e)))
                     continue
 
                 try:
                     line = line.decode('utf-8')
                 except Exception as e:
-                    debug.write("error decoding line {}\r\n".format(str(e)))
+                    print("error decoding line {}".format(str(e)))
                     continue
 
                 # If we got a line of code process it
                 if line:
-                    debug.write(line)
+                    print(line)
                     # State changes from the modem start with +
                     if line.startswith('+'):
                         self.handle_state(line)
@@ -139,7 +139,7 @@ class BC66:
         try:
             command, result = new_line.split(':', 1)
         except ValueError:
-            debug.write(f"ValueError {line} \r\n")
+            print(f"ValueError {line}")
             return
 
         if "CEREG" in command:
@@ -163,11 +163,11 @@ class BC66:
                 if int(result[1]) == 0:
                     self.state = MQTTOPEN
                 else:
-                    debug.write("Failed to open MQTT\r\n")
+                    print("Failed to open MQTT")
                     self.state = MQTTFAIL
 
             except ValueError:
-                debug.write(f"ValueError: splitting result {result}")
+                print(f"ValueError: splitting result {result}")
 
         # +QMTSTAT: <TCP_connectID>,<err_ code> 1,2,3
         elif "QMTSTAT" in command:
@@ -185,7 +185,7 @@ class BC66:
         elif "QMTRECV" in command:
             result = result.split(',')
             line = result[3]
-            debug.write(line)
+            print(line)
 
         # +CBC: 0,0,3275 Battery level 
         elif "CBC" in command:
@@ -215,7 +215,7 @@ class BC66:
         try:
             modem.write(bytes(command))
         except Exception as e:
-            debug.write("Error:{e} writing {command}\r\n")
+            print("Error:{e} writing {command}")
             return
 
         while not done:
@@ -271,7 +271,7 @@ def mqtt(bc66):
 def main():
     global done
     
-    debug.write("Ready\r\n")
+    print("Ready")
 
     with lock:
         done = False
