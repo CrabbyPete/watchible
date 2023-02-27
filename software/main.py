@@ -20,10 +20,12 @@ def main():
         bc66.send_at('AT+QSCLK?')          # Enable light and deepsleep PSM
         bc66.send_at('AT+CBC')             # Battery level
         bc66.send_at('AT+CGDCONT?')
+        while not bc66.ip:
+            time.sleep(.5)
 
         bc66.mqtt()
 
-        while not bc66.state  == RESET:
+        while not bc66.state == RESET:
             time.sleep(2)
 
 

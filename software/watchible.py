@@ -94,11 +94,12 @@ class BC66:
     """
     Basic functions of the BC66 modem to get it working
     """
+    ip         = None
     psm        = False
-    status     = None
-    alarm      = None
     ccid       = None
-    registered = None
+    alarm      = None
+    status     = None
+    registered = False
 
     def __init__(self):
         self.read = _thread.start_new_thread(self.reader, ())
@@ -117,13 +118,16 @@ class BC66:
         reset.value(0)
         self.state = STARTED
 
-    def registered(self, timeout=None):
+    def network_registered(self, timeout=None):
         """
         Determine if the modem is registered on the network
         :return: True
         """
         now = time.time()
-        while not self.registered:
+        ready = False
+        while not ready:
+            with lock:
+                ready = self.registered
             self.send_at("AT+CEREG?")
             if timeout:
                 t = now - time.time()
@@ -268,6 +272,10 @@ class BC66:
 
         elif "QCFG" in command:
             pass
+        
+        elif "+IP" in command:
+            if len(result.split('.')) > 3:
+                self.ip = result
 
     def send_at(self, command, timeout=None):
         """
