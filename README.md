@@ -10,7 +10,6 @@ With other add on boards the number of things that can be monitored is limitless
 gas sensors, and any kind of switch.  The board can be used in fault analysis in remote places like buildings or bridges, 
 using ultrasonic or vibration analysis.
 
-
 Because it sits on the Raspberry Pi Pico It can easily be programmed to use any cloud IOT service, such as AWS, Azure, 
 Google, or HiveMQTT. It can be programmed in C/C++ and Python. When placed in a hardened enclosure Watchible provides a 
 small profile remote monitor that can be placed anywhere and simply run with little to no maintenance.
