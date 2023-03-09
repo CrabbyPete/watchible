@@ -2,31 +2,31 @@ import time
 import json
 import utime
 import machine
-import _thread
 
+# import _thread
 
 # Create a lock to share states read from the modem
-lock = _thread.allocate_lock()
+# lock = _thread.allocate_lock()
 
 # Use UART2 to talk to the BC66 modem
-modem = machine.UART(1, 115200, timeout=100, timeout_char=100, rxbuf=3*1024, txbuf=3*1024)
-
+modem = machine.UART(1, 115200, timeout=100, timeout_char=100, rxbuf=3 * 1024, txbuf=3 * 1024)
 
 # These pins are defined on the Watchible board
-water_alarm = machine.Pin( 2, machine.Pin.IN,  machine.Pin.PULL_UP)
-alarm_led   = machine.Pin( 3, machine.Pin.OUT, machine.Pin.PULL_DOWN)
-reset       = machine.Pin(13, machine.Pin.OUT, machine.Pin.PULL_DOWN)
-pwr_reset   = machine.Pin(14, machine.Pin.OUT, machine.Pin.PULL_DOWN)
-psm_eint    = machine.Pin(15, machine.Pin.OUT, machine.Pin.PULL_UP)
+pico_led = machine.Pin(25, machine.Pin.OUT)
+water_alarm = machine.Pin(2, machine.Pin.IN, machine.Pin.PULL_UP)
+alarm_led = machine.Pin(3, machine.Pin.OUT, machine.Pin.PULL_DOWN)
+reset = machine.Pin(13, machine.Pin.OUT, machine.Pin.PULL_DOWN)
+pwr_reset = machine.Pin(14, machine.Pin.OUT, machine.Pin.PULL_DOWN)
+psm_eint = machine.Pin(15, machine.Pin.OUT, machine.Pin.PULL_UP)
 
-
-RESET            = 2
-REGISTERED       = 3
-MQTTOPENED       = 4
-MQTTNOTOPENED    = 5
-MQTTCLOSED       = 6
-MQTTCONNECTED    = 7
+RESET = 2
+REGISTERED = 3
+MQTTOPENED = 4
+MQTTNOTOPENED = 5
+MQTTCLOSED = 6
+MQTTCONNECTED = 7
 MQTTNOTCONNECTED = 8
+
 
 def time_str():
     """
@@ -44,6 +44,7 @@ def time_str():
 
 alarm_set = False
 last_alarm = None
+
 
 def callback(p):
     """
@@ -76,14 +77,16 @@ def temperature():
     :return:
     """
     adc = machine.ADC(4)
-    adc_voltage = adc.read_u16() * (3.3 / (65535))
-    return str(27 - (adc_voltage - 0.706)/0.001721)
+    adc_voltage = adc.read_u16() * (3.3 / 65535)
+    return str(27 - (adc_voltage - 0.706) / 0.001721)
 
 
 class BC66:
-    state =  None
-    battery = None
+    psm = False
     ccid = None
+    clock = time_str()
+    state = None
+    battery = None
     ip_address = None
     last_command = None
     registered = False
@@ -117,7 +120,7 @@ class BC66:
                 if int(result[1]) in (1, 5):
                     self.state = REGISTERED
             else:
-                if int(result[0]) in (1,5):
+                if int(result[0]) in (1, 5):
                     self.state = REGISTERED
 
         except ValueError as e:
@@ -148,8 +151,7 @@ class BC66:
         except ValueError as e:
             print(f"ValueError:{e} for QMTOPEN:{result}")
 
-
-    def MQSTAT(self,result):
+    def MQSTAT(self, result):
         """
         +QMTSTAT: <TCP_connectID>,<err_ code> 1,2,3
         :param result:
@@ -184,7 +186,7 @@ class BC66:
         except ValueError as e:
             print(f"ValueError:{e} for QMTCONN:{result}")
 
-    def MQTRECV(self,result):
+    def MQTRECV(self, result):
         """
         +QMTRECV: 0,0,"device/status","it works" If PSM sleeping this will not happen
         :param self:
@@ -212,11 +214,19 @@ class BC66:
     def CBC(self, result):
         """
         # +CBC: 0,0,3275 Battery level
-        :param result:
+        # Get the current battery level
+        :param result: str: remaining return
         :return:
         """
         result = result.split(',')
         self.battery = result[2]
+
+    def CCLK(self, result):
+        """
+        b'+CCLK: 2023/03/09,14:02:31GMT-5\r\n'
+        Get the current clock time from the network
+        """
+        self.clock = result.replace('\r\n', '').strip()
 
     def QNBIOT(self, result):
         """ in command: # Indicate QNBIOT events, show the state of PSM
@@ -242,14 +252,14 @@ class BC66:
         result = result.split(',')
         ip_address = result[3].split('.')
         if len(ip_address) == 4:
-            self.ip = result[3]
+            self.ip_address = result[3]
 
-    def at(self,command):
+    def at(self, command):
         if not command.startswith('at'):
-            command = 'at+'+command
+            command = 'at+' + command
         command = command + '\r'
         print(f'sending {command}')
-        modem.write(bytes(command,'utf-8'))
+        modem.write(bytes(command, 'utf-8'))
         self.last_command = command
 
     def reader(self):
@@ -257,7 +267,7 @@ class BC66:
             data = modem.readline()
             print(data)
             try:
-                data = data.decode('utf-8','ignore')
+                data = data.decode('utf-8', 'ignore')
             except Exception as e:
                 print(f"Error:{str(e)} reading data")
                 return None
@@ -270,8 +280,8 @@ class BC66:
                 self.last_command = None
 
             if data.startswith('+'):
-                status, result = data.split(':',1)
-                status = status.replace('+','').strip()
+                status, result = data.split(':', 1)
+                status = status.replace('+', '').strip()
                 if hasattr(self, status):
                     func = getattr(self, status)
                     func(result)
@@ -307,12 +317,14 @@ def main():
             pass
 
     while True:
+        pico_led.value(1)
         index = 0
         while index < len(commands):
             if not bc66.last_command:
                 command = None
                 if 'conn' in commands[index]:
                     if bc66.state == MQTTOPENED:
+                        alarm_led.value(1)
                         command = commands[index].format(bc66.ccid)
                     elif bc66.state == MQTTNOTOPENED:
                         index += 2
@@ -321,7 +333,7 @@ def main():
                     if bc66.state == MQTTCONNECTED:
                         command = commands[index].format(bc66.report())
                     elif bc66.state == MQTTNOTCONNECTED:
-                        index +=1
+                        index += 1
                 else:
                     command = commands[index]
 
@@ -331,7 +343,7 @@ def main():
 
             while data := bc66.reader():
                 if '>' in data:
-                    with open('mosquitto.org.crt','rb') as f:
+                    with open('mosquitto.org.crt', 'rb') as f:
                         size = 0
                         for l in f.readlines():
                             size += modem.write(l)
@@ -340,7 +352,9 @@ def main():
                     modem.write(bytes([26]))
 
         while True:
-            data = bc66.reader()
+            pico_led.value(0)
+            alarm_led.value(0)
+            bc66.reader()
             if bc66.state == RESET:
                 break
             time.sleep(1)
