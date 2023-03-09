@@ -1,3 +1,8 @@
+"""
+This version used both processors, one to read and the other to do the main work. It simply talks
+to an open source HiveMQ MQTT broker, and has no certs or security
+"""
+
 import time
 import json
 import utime

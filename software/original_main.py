@@ -1,3 +1,9 @@
+
+
+"""
+Tho original device used UART1 to talk to the modem, and UART2 to talk to the PICO. This was changed in
+the next version of the device, but switching the UARTS on the latest it will still work
+"""
 import time
 import json
 import utime
@@ -174,8 +180,7 @@ class BC66:
                 lines.append(result)
 
         elif "QCFG" in command:
-            with lock:
-                self.status = QCFG
+            pass
 
     def send_at(self, command):
         debug.write(f"sending {command}\r\n")
