@@ -9,7 +9,7 @@ import machine
 # lock = _thread.allocate_lock()
 
 # Use UART2 to talk to the BC66 modem
-modem = machine.UART(1, 115200, timeout=100, timeout_char=100, rxbuf=3 * 1024, txbuf=3 * 1024)
+modem = machine.UART(1, 115200, timeout=100, timeout_char=100, rxbuf=2*1024)
 
 # These pins are defined on the Watchible board
 pico_led = machine.Pin(25, machine.Pin.OUT)
@@ -19,6 +19,7 @@ reset = machine.Pin(13, machine.Pin.OUT, machine.Pin.PULL_DOWN)
 pwr_reset = machine.Pin(14, machine.Pin.OUT, machine.Pin.PULL_DOWN)
 psm_eint = machine.Pin(15, machine.Pin.OUT, machine.Pin.PULL_UP)
 
+RESTART = 1 
 RESET = 2
 REGISTERED = 3
 MQTTOPENED = 4
@@ -26,6 +27,7 @@ MQTTNOTOPENED = 5
 MQTTCLOSED = 6
 MQTTCONNECTED = 7
 MQTTNOTCONNECTED = 8
+SLEEP = 1
 
 
 def time_str():
@@ -57,7 +59,7 @@ def callback(p):
 
     # Check to see it the alarm has gone off already in the last hour
     if not last_alarm or now - last_alarm > 3600:
-        print('Alarm')
+        print(f'Alarm: {water_alarm.value()}')
         alarm_set = True
 
         # Trigger the modem to wake up
@@ -83,13 +85,13 @@ def temperature():
 
 class BC66:
     psm = False
+    brom = False
     ccid = None
     clock = time_str()
     state = None
     battery = None
     ip_address = None
     last_command = None
-    registered = False
 
     def __init__(self):
         pwr_reset.value(0)
@@ -106,7 +108,7 @@ class BC66:
         :return:
         """
         msg = json.dumps({'ccid': self.ccid,
-                          'alarm': alarm_set,
+                          'alarm': True if water_alarm.value() == 0 else False,
                           'temperature': temperature(),
                           'volts': self.battery,
                           'timestamp': time_str()})
@@ -200,21 +202,9 @@ class BC66:
         except ValueError as e:
             print(f"ValueError:{e} for QMTRECV:{result}")
 
-    def QNBIOTEVENT(self, result):
-        """
-        An unsolicited event
-        :param result:
-        :return:
-        """
-        if "ENTER PSM" in result:
-            self.psm = True
-        else:
-            self.psm = False
-
     def CBC(self, result):
         """
-        # +CBC: 0,0,3275 Battery level
-        # Get the current battery level
+        # Get the current battery level eg. +CBC: 0,0,3275 Battery level
         :param result: str: remaining return
         :return:
         """
@@ -223,15 +213,19 @@ class BC66:
 
     def CCLK(self, result):
         """
-        b'+CCLK: 2023/03/09,14:02:31GMT-5\r\n'
-        Get the current clock time from the network
+        Get the current clock time from the network eg. b'+CCLK: 2023/03/09,14:02:31GMT-5\r\n'
         """
         self.clock = result.replace('\r\n', '').strip()
 
-    def QNBIOT(self, result):
+    def QNBIOTEVENT(self, result):
         """ in command: # Indicate QNBIOT events, show the state of PSM
         """
-        pass
+        print(result)
+        if 'ENTER PSM' in result:
+            self.psm = True
+
+        elif 'EXIT PSM' in result:
+            self.psm = False
 
     def IP(self, result):
         """
@@ -257,7 +251,7 @@ class BC66:
     def at(self, command):
         if not command.startswith('at'):
             command = 'at+' + command
-        command = command + '\r'
+        command = command + '\r\n'
         print(f'sending {command}')
         modem.write(bytes(command, 'utf-8'))
         self.last_command = command
@@ -273,13 +267,13 @@ class BC66:
                 return None
 
             if 'BROM' in data:
-                self.state = RESET
-                time.sleep(1)
+                self.state = RESTART
+                self.brom = True
 
-            if 'OK' in data or 'ERROR' in data:
+            elif 'OK' in data or 'ERROR' in data:
                 self.last_command = None
 
-            if data.startswith('+'):
+            elif data.startswith('+'):
                 status, result = data.split(':', 1)
                 status = status.replace('+', '').strip()
                 if hasattr(self, status):
@@ -292,14 +286,15 @@ class BC66:
 
 
 def main():
+    global alarm_set, modem
+    
     bc66 = BC66()
-    commands = ['ati',
-                'qccid',
+    commands = ['qccid',
                 'cclk?',
                 'cbc',
                 'cereg=5',
                 'qnbiotevent=1,1',
-                'cpsms=1,,,"00100001","00100001"',
+                'cpsms=1,,,"10100101","00100001"', #5 minutes, 1 min active
                 'qsslcfg=1,5,"cacert"',
                 'qsslcfg=1,5,"seclevel",1',
                 'qmtcfg="ssl",0,1,1,5',
@@ -309,31 +304,47 @@ def main():
                 'qmtclose=0'
                 ]
 
-    # Wait for the modem to register on the network
-    while not bc66.state == REGISTERED:
-        time.sleep(1)
-        bc66.at('cereg?')
-        while bc66.reader():
-            pass
-
+    # Loop forever
     while True:
+
         pico_led.value(1)
+
+        # Wait for the modem to register on the network
+        while not bc66.state == REGISTERED:
+            while bc66.reader():
+                pass
+            time.sleep(1)
+            bc66.at('cereg?')
+
+        # Send each command
         index = 0
         while index < len(commands):
+
+            # Make sure there are no pending commands before sending the next
             if not bc66.last_command:
                 command = None
+
+                # If this is qmtconnn, make sure we opened first
                 if 'conn' in commands[index]:
                     if bc66.state == MQTTOPENED:
                         alarm_led.value(1)
                         command = commands[index].format(bc66.ccid)
-                    elif bc66.state == MQTTNOTOPENED:
-                        index += 2
 
+                    # If you tried to open and it failed, try again
+                    elif bc66.state == MQTTNOTOPENED:
+                        index -= 1
+
+                # If this is a qmtpub(lish), make sure we are connected
                 elif 'pub' in commands[index]:
                     if bc66.state == MQTTCONNECTED:
                         command = commands[index].format(bc66.report())
+                        alarm_set = False
+                        
+                    # If you are not connected, close and wait for the next round
                     elif bc66.state == MQTTNOTCONNECTED:
                         index += 1
+
+                # Just write the current command
                 else:
                     command = commands[index]
 
@@ -341,7 +352,10 @@ def main():
                     bc66.at(command)
                     index += 1
 
+            # See what the modem returns after sending commands
             while data := bc66.reader():
+
+                # If you sent the cert command send the cert a line at a time
                 if '>' in data:
                     with open('mosquitto.org.crt', 'rb') as f:
                         size = 0
@@ -351,14 +365,22 @@ def main():
                         print(f"wrote {size} bytes for cert")
                     modem.write(bytes([26]))
 
-        while True:
-            pico_led.value(0)
-            alarm_led.value(0)
+        # Go into deep sleep and wait for PSM or an alarm
+        alarm_led.value(0)
+
+        while not bc66.psm:
+            time.sleep_ms(50)
             bc66.reader()
-            if bc66.state == RESET:
-                break
-            time.sleep(1)
+
+        pico_led.value(0)
+        
+        # Wait a little less the the PSM time.
+        print(f'in:{time_str()}')
+        machine.lightsleep(260*1000)
+        print(f'out:{time_str()}')
+
+        bc66.state = RESET
 
 
 if __name__ == '__main__':
-    main()
+        main()
