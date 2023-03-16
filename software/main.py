@@ -19,7 +19,7 @@ reset = machine.Pin(13, machine.Pin.OUT, machine.Pin.PULL_DOWN)
 pwr_reset = machine.Pin(14, machine.Pin.OUT, machine.Pin.PULL_DOWN)
 psm_eint = machine.Pin(15, machine.Pin.OUT, machine.Pin.PULL_UP)
 
-RESTART = 1 
+RESTART = 1
 RESET = 2
 REGISTERED = 3
 MQTTOPENED = 4
@@ -75,7 +75,7 @@ water_alarm.irq(trigger=machine.Pin.IRQ_FALLING, handler=callback)
 
 def temperature():
     """
-    Read the on board temperature
+    Read the on-board temperature
     :return:
     """
     adc = machine.ADC(4)
@@ -94,13 +94,22 @@ class BC66:
     last_command = None
 
     def __init__(self):
+        self.power_reset()
+
+    def power_reset(self):
         pwr_reset.value(0)
-        time.sleep(.5)
+        time.sleep_ms(500)
         pwr_reset.value(1)
-        time.sleep(.5)
+        time.sleep_ms(500)
         pwr_reset.value(0)
         reset.value(0)
         self.state = RESET
+
+    def reset(self):
+        reset.value(1)
+        time.sleep_ms(100)
+        reset.value(0)
+
 
     def report(self):
         """
@@ -111,18 +120,20 @@ class BC66:
                           'alarm': True if water_alarm.value() == 0 else False,
                           'temperature': temperature(),
                           'volts': self.battery,
-                          'timestamp': time_str()})
+                          'timestamp': self.clock
+                          })
         return msg
 
     def CEREG(self, result):
-        result = result.split(',')
+        result = result.replace('\r\n', '').split(',')
         try:
-            # If its greater than 2 its an unsolicited response
-            if not len(result) > 2:
+            # If it's an unsolicited response it will be 1 element <stat>
+            if len(result) == 1 and int(result[0]) in (1, 5):
+                self.state = REGISTERED
+
+            # If it's a solicited response it will be <n><stat>
+            elif len(result) == 2:
                 if int(result[1]) in (1, 5):
-                    self.state = REGISTERED
-            else:
-                if int(result[0]) in (1, 5):
                     self.state = REGISTERED
 
         except ValueError as e:
@@ -209,7 +220,7 @@ class BC66:
         :return:
         """
         result = result.split(',')
-        self.battery = result[2]
+        self.battery = result[2].replace('\r\n', '').strip()
 
     def CCLK(self, result):
         """
@@ -220,7 +231,6 @@ class BC66:
     def QNBIOTEVENT(self, result):
         """ in command: # Indicate QNBIOT events, show the state of PSM
         """
-        print(result)
         if 'ENTER PSM' in result:
             self.psm = True
 
@@ -252,14 +262,14 @@ class BC66:
         if not command.startswith('at'):
             command = 'at+' + command
         command = command + '\r\n'
-        print(f'sending {command}')
+        # print(f'sending {command}')
         modem.write(bytes(command, 'utf-8'))
         self.last_command = command
 
     def reader(self):
         if modem.any():
             data = modem.readline()
-            print(data)
+            # print(data)
             try:
                 data = data.decode('utf-8', 'ignore')
             except Exception as e:
@@ -287,34 +297,44 @@ class BC66:
 
 def main():
     global alarm_set, modem
-    
     bc66 = BC66()
-    commands = ['qccid',
-                'cclk?',
-                'cbc',
-                'cereg=5',
-                'qnbiotevent=1,1',
-                'cpsms=1,,,"10100101","00100001"', #5 minutes, 1 min active
-                'qsslcfg=1,5,"cacert"',
-                'qsslcfg=1,5,"seclevel",1',
-                'qmtcfg="ssl",0,1,1,5',
-                'qmtopen=0,"test.mosquitto.org",8883',
-                'qmtconn=0,"{}"',
-                'qmtpub=0,0,0,0,"device/state","{}"',
-                'qmtclose=0'
+    commands = ['cereg=1',                              # Is the network registered, request <n><stat>
+                'qsclk=0',                              # Turn off PSM while we send commands
+                'cclk?',                                # Get the time
+                'qccid',                                # Get the ccid
+                'cbc',                                  # Get the battery level
+                'qnbiotevent=1,1',                      # Report PSM events
+                'cpsms=1,,,"10100101","00100001"',      # Set PSM 5 minutes, 1 min active
+                'qsslcfg=1,5,"cacert"',                 # Send a cert
+                'qsslcfg=1,5,"seclevel",1',             # Set security to client cert (1 server cert required)
+                'qmtcfg="ssl",0,1,1,5',                 # Turn on SSL
+                'qmtopen=0,"test.mosquitto.org",8883',  # Open the MQTT broker
+                'qmtconn=0,"{}"',                       # Connect to MQTT broker
+                'qmtpub=0,0,0,0,"device/state","{}"',   # Publish message
+                'qmtclose=0',                           # Close the connection ( required for PSM mode )
+                'qsclk=1'                               # Turn PSM back on
                 ]
 
     # Loop forever
     while True:
-
         pico_led.value(1)
 
-        # Wait for the modem to register on the network
-        while not bc66.state == REGISTERED:
+        # Wait 60 seconds for the modem to register on the network
+        for _ in range(120):
+            if bc66.state == REGISTERED:
+                break
+
+            time.sleep(2)
+            bc66.at('cereg?')
             while bc66.reader():
                 pass
-            time.sleep(1)
-            bc66.at('cereg?')
+
+        # If things get out of sync, start over
+        else:
+            return
+
+        # Indicates we are talking to the modem ( this goes fast ) Don't use if measuring power
+        alarm_led.value(1)
 
         # Send each command
         index = 0
@@ -332,14 +352,14 @@ def main():
 
                     # If you tried to open and it failed, try again
                     elif bc66.state == MQTTNOTOPENED:
-                        index -= 1
+                        index += 2
 
                 # If this is a qmtpub(lish), make sure we are connected
                 elif 'pub' in commands[index]:
                     if bc66.state == MQTTCONNECTED:
                         command = commands[index].format(bc66.report())
                         alarm_set = False
-                        
+
                     # If you are not connected, close and wait for the next round
                     elif bc66.state == MQTTNOTCONNECTED:
                         index += 1
@@ -359,28 +379,27 @@ def main():
                 if '>' in data:
                     with open('mosquitto.org.crt', 'rb') as f:
                         size = 0
-                        for l in f.readlines():
-                            size += modem.write(l)
+                        for line in f.readlines():
+                            size += modem.write(line)
                             time.sleep_ms(100)
-                        print(f"wrote {size} bytes for cert")
+                        # print(f"wrote {size} bytes for cert")
                     modem.write(bytes([26]))
 
-        # Go into deep sleep and wait for PSM or an alarm
+        # Done sending commands, wait for the modem to tell its in PSM mode
+        bc66.psm = False
         alarm_led.value(0)
+        pico_led.value(0)
 
+        # Make sure everything has been sent and wait for psm
         while not bc66.psm:
-            time.sleep_ms(50)
             bc66.reader()
 
-        pico_led.value(0)
-        
-        # Wait a little less the the PSM time.
-        print(f'in:{time_str()}')
-        machine.lightsleep(260*1000)
-        print(f'out:{time_str()}')
-
+        # Wait a little less than the PSM time. Try to sync lightsleep and PSM as close as possible
+        machine.lightsleep(240000)  # In this case the sleep is 4 min. 30 secs. PSM is 5 min.
         bc66.state = RESET
 
 
 if __name__ == '__main__':
+    while True:
         main()
+
