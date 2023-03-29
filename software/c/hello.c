@@ -1,11 +1,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "hardware/rtc.h"
 #include "pico/stdlib.h"
 #include "hardware/uart.h"
 #include "hardware/irq.h"
 #include "hardware/gpio.h"
 #include "hardware/adc.h"
+#include "pico/util/datetime.h"
+
 #include "queue.h"
 #include "hello.h"
 #include "cert.h"
@@ -110,16 +113,15 @@ void cereg(char *result)
     // eg. +CEREG: 0,1\r\n'"
 
     // If it's a solicited response it will be <n>,<stat>
-    char *stat = strtok(result, (const char *)',');
+    char *stat = strchr(result, ',');
     
-
    // If it's an unsolicited response it will be 1 element <stat>
-    if (stat == NULL)
-        stat = result;
-    else
+    if (stat != NULL)
         stat++;
+    else
+        stat = result++; // Skip the space 
 
-    printf("stat = %c\r\n",*stat);
+    printf("stat = \'%c\' \r\n", *stat);
     if (stat[0] == '1' || stat[0] == '5')
     {
         printf("Registered\r\n");
@@ -151,9 +153,35 @@ void cbc(char * result)
 char currentTime[26];
 void clock( char *result)
 {
+    // +CCLK: 2023/03/26,16:32:07GMT-4
+
+    int y,m,d,h,n,s,gmt;
+    sscanf(result, "%4d/%2d/%2d,%2d:%2d:%2dGMT%1d", &y, &m, &d, &h, &n, &s, &gmt);
+    
+
     removeChar(result,'\r');
     removeChar(result,'\n');
     strcpy(currentTime, result);
+    
+    h = h - gmt;
+    if (h <= 0)
+    {
+        h = 24-h;
+        d -= 1;
+    }
+
+    datetime_t t = {
+            .year  = y,
+            .month = m,
+            .day   = d,
+            .hour  = h,
+            .min   = n,
+            .sec   = s,
+            .dotw  = (d += m < 3 ? y-- : y - 2, 23*m/9 + d + 4 + y/4- y/100 + y/400)%7
+    };
+    printf("%d %d %d  %d:%d:%d",y, m, d, h, n, s);
+    rtc_set_datetime(&t);
+
 }
 
 bool mqttOpened = false;
@@ -171,6 +199,11 @@ void qmtopen(char *result)
     }
 }
 
+void qmtclose(char *result)
+{
+    mqttOpened = false;
+}
+
 bool mqttConnected = false;
 void qmtconn(char *result)
 {
@@ -183,6 +216,21 @@ void qmtconn(char *result)
     {
         mqttConnected == false;
         printf("Not Connected", mqttConnected);
+    }
+}
+
+bool mqttPublished = false;
+void qmtpub(char *result)
+{
+    if (result[2] == '0')
+    {
+        mqttPublished = true;
+        printf("Published\r\n", mqttConnected);
+    }
+    else
+    {
+        mqttPublished == false;
+        printf("Published", mqttConnected);
     }
 }
 
@@ -203,11 +251,14 @@ typedef struct
     void (*func)(char *);
 } State;
 
-#define STATUS_CMDS 12
+#define STATUS_CMDS 15
 const State STATE[STATUS_CMDS]= {
     {"+CEREG",       cereg      },
     {"+QCCID",       ccid       },
     {"+QMTOPEN",     qmtopen    },
+    {"+QMTCONN" ,    qmtconn    },
+    {"+QMTPUB",      qmtpub     },
+    {"+QMTCLOSE",    qmtclose   },
     {"+MQSTAT",      nothing    },
     {"+QMTCLOSE",    nothing    },
     {"+QMTCONN" ,    qmtconn    },
@@ -215,14 +266,14 @@ const State STATE[STATUS_CMDS]= {
     {"+CBC",         cbc        },
     {"+CCLK",        clock      },
     {"+QNBIOTEVENT", qnbiotevent},
-    {"+IP",          nothing},
-    {"+CGDCONT",     nothing}
+    {"+IP",          nothing    },
+    {"+CGDCONT",     nothing    }
 };
 
 // Send AT commnds to the modem
 void send_at(char *command)
 {
-    char line[100];
+    char line[500];
     sprintf(line, "at+%s\r\n", command);
     for( int i = 0; i < strlen(line); i++)
         uart_putc(MODEM, line[i]);
@@ -298,20 +349,19 @@ const char *commands[NUM_COMMANDS] = {                      // Is the network re
 char jsonMsg[200];
 char *build_message(void)
 {
-    char *msg = "{\\\"ccid\":\\\"%s\\\", \\\"alarm\\\":\\\"false\\\",\\\"temperature\\\":\\\"20\\\",\\\"volts\\\":\\\"%s\",\\\"timestamp\\\":\\\"%s\\\"}";
+    char *msg = "{\"ccid\":\"%s\",\"alarm\":false,\"temperature\":\"20\",\"volts\":\"%s\",\"timestamp\":\"%s\"}";
     sprintf(jsonMsg, msg, ccidNumber, battery, currentTime);      
     return jsonMsg;
 }
 
-int main() {
+char new_command[200];
+int loop() {
   
     bool last_completed = false;    // Did the last command you send complete
     bool blink = false;
     bool waiting = false;
- 
-    setup_default_uart();
-    modem_setup();
-    pin_setup();
+    char datetime_buf[256];
+
 
     while(true)
     {
@@ -340,7 +390,7 @@ int main() {
                 continue;
             }
             
-            printf("cmd_index %d waiting %d %d\r\n", cmd_index, mqttOpened, mqttConnected);
+            printf("cmd_index %d waiting %d %d %d\r\n", cmd_index, mqttOpened, mqttConnected, mqttPublished);
 
             if (cmd_index < NUM_COMMANDS)
             {
@@ -354,13 +404,13 @@ int main() {
                 {
                     waiting = false;
                     if (cmd_index == 12)
-                    {
-                        char new_command[200];
-                        sprintf(new_command, commands[cmd_index], build_message());
-                        printf("%s\r\n", new_command);
+                    {  
+                        char *msg = build_message();
+                        sprintf(new_command, commands[cmd_index++], msg);
+                        send_at(new_command);
                     }
-                    send_at((char *)commands[cmd_index++]);
-                    sleep_ms(500);
+                    else
+                        send_at((char *)commands[cmd_index++]);
                 }
             }
             else
@@ -369,8 +419,37 @@ int main() {
             }
         }
         if (psmMode)
+        {
             printf("PSM:%s\r\n", psmMode?"true":"false");
-
+            datetime_t t;
+            rtc_get_datetime(&t);
+            datetime_to_str(datetime_buf, sizeof(datetime_buf), &t);
+            printf("time:%s\r\n",datetime_buf);            
+            absolute_time_t until = delayed_by_ms(get_absolute_time(), 240000);
+            sleep_until(until);
+            return 1;
+        }
         sleep_ms(10);
+    }
+}
+
+
+void main()
+{
+    rtc_init();
+    setup_default_uart();
+    modem_setup();
+    pin_setup();
+
+    while (true)
+    {
+        psmMode = false;
+        registered = false;
+        mqttOpened = false;
+        mqttConnected = false;
+        cmd_index = 0;
+
+        loop();
+
     }
 }

@@ -269,7 +269,7 @@ class BC66:
     def reader(self):
         if modem.any():
             data = modem.readline()
-            # print(data)
+            print(data)
             try:
                 data = data.decode('utf-8', 'ignore')
             except Exception as e:
