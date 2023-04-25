@@ -19,6 +19,9 @@ reset = machine.Pin(13, machine.Pin.OUT, machine.Pin.PULL_DOWN)
 pwr_reset = machine.Pin(14, machine.Pin.OUT, machine.Pin.PULL_DOWN)
 psm_eint = machine.Pin(15, machine.Pin.OUT, machine.Pin.PULL_UP)
 
+
+BC66_NA = True
+
 RESTART = 1
 RESET = 2
 REGISTERED = 3
@@ -87,6 +90,7 @@ class BC66:
     psm = False
     brom = False
     ccid = None
+    imei = None
     clock = time_str()
     state = None
     battery = None
@@ -117,6 +121,7 @@ class BC66:
         :return:
         """
         msg = json.dumps({'ccid': self.ccid,
+                          'imea': self.imei,
                           'alarm': True if water_alarm.value() == 0 else False,
                           'temperature': temperature(),
                           'volts': self.battery,
@@ -135,6 +140,7 @@ class BC66:
             elif len(result) == 2:
                 if int(result[1]) in (1, 5):
                     self.state = REGISTERED
+                
 
         except ValueError as e:
             print(f"ValueError:{e} for CEREG:{result}")
@@ -146,6 +152,14 @@ class BC66:
         :return:
         """
         self.ccid = result.strip()
+
+    def QCGSN(self, result):
+        """
+        Get the imei
+        :param result:
+        :return:
+        """
+        self.imei = result.strip()
 
     def QMTOPEN(self, result):
         """
@@ -220,7 +234,11 @@ class BC66:
         :return:
         """
         result = result.split(',')
-        self.battery = result[2].replace('\r\n', '').strip()
+        try:
+            self.battery = result[2].replace('\r\n', '').strip()
+        except:
+            self.battery  = result[0].replace('\r\n', '').strip()
+        
 
     def CCLK(self, result):
         """
@@ -284,7 +302,12 @@ class BC66:
                 self.last_command = None
 
             elif data.startswith('+'):
-                status, result = data.split(':', 1)
+                try:
+                    status, result = data.split(':', 1)
+                except ValueError as e:
+                    print(f"Error:{str(e)} for {data}")
+                    status = data
+
                 status = status.replace('+', '').strip()
                 if hasattr(self, status):
                     func = getattr(self, status)
@@ -298,16 +321,16 @@ class BC66:
 def main():
     global alarm_set, modem
     bc66 = BC66()
-    commands = ['cereg=1',                              # Is the network registered, request <n><stat>
-                'qsclk=0',                              # Turn off PSM while we send commands
+    commands = ['qsclk=0',                              # Turn off PSM while we send commands
                 'cclk?',                                # Get the time
                 'qccid',                                # Get the ccid
+                'cgsn',                                 # Get IMEI
                 'cbc',                                  # Get the battery level
                 'qnbiotevent=1,1',                      # Report PSM events
                 'cpsms=1,,,"10100101","00100001"',      # Set PSM 5 minutes, 1 min active
-                'qsslcfg=1,5,"cacert"',                 # Send a cert
-                'qsslcfg=1,5,"seclevel",1',             # Set security to client cert (1 server cert required)
-                'qmtcfg="ssl",0,1,1,5',                 # Turn on SSL
+                'qsslcfg=1,1,"cacert"',                 # Send a cert
+                'qsslcfg=1,1,"seclevel",1',             # Set security to client cert (1 server cert required)
+                'qmtcfg="ssl",0,1,1,1',                 # Turn on SSL
                 'qmtopen=0,"test.mosquitto.org",8883',  # Open the MQTT broker
                 'qmtconn=0,"{}"',                       # Connect to MQTT broker
                 'qmtpub=0,0,0,0,"device/state","{}"',   # Publish message
@@ -317,6 +340,8 @@ def main():
 
     # Loop forever
     while True:
+        
+        bc66.at('cereg=1')                              # Is the network registered, request <n><stat>
         pico_led.value(1)
 
         # Wait 60 seconds for the modem to register on the network
@@ -328,6 +353,8 @@ def main():
             bc66.at('cereg?')
             while bc66.reader():
                 pass
+            bc66.at('qccid')
+            
 
         # If things get out of sync, start over
         else:
@@ -377,11 +404,15 @@ def main():
 
                 # If you sent the cert command send the cert a line at a time
                 if '>' in data:
-                    with open('mosquitto.org.crt', 'rb') as f:
-                        size = 0
-                        for line in f.readlines():
-                            size += modem.write(line)
-                            time.sleep_ms(100)
+                    if bc66.state == MQTTCONNECTED:
+                        modem.write(bc66.report())
+                    else:
+                        with open('mosquitto.org.crt', 'rb') as f:
+                            size = 0
+                            for line in f.readlines():
+                                size += modem.write(line)
+                                time.sleep_ms(100)
+
                         # print(f"wrote {size} bytes for cert")
                     modem.write(bytes([26]))
 
