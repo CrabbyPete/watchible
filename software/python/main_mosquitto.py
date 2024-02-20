@@ -354,7 +354,6 @@ def main():
             while bc66.reader():
                 pass
             bc66.at('qccid')
-            
 
         # If things get out of sync, start over
         else:
@@ -407,7 +406,7 @@ def main():
                     if bc66.state == MQTTCONNECTED:
                         modem.write(bc66.report())
                     else:
-                        with open('mosquitto.org.crt', 'rb') as f:
+                        with open('certs/mosquitto.org.crt', 'rb') as f:
                             size = 0
                             for line in f.readlines():
                                 size += modem.write(line)
