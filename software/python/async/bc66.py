@@ -10,12 +10,12 @@ from config import host, port, cacert, clientkey, clientcert
 modem = machine.UART(1, 115200, timeout=100, timeout_char=100, rxbuf=2 * 1024)
 
 # These pins are defined on the Watchible board
-water_alarm = machine.Pin( 2, machine.Pin.IN, machine.Pin.PULL_UP)
-alarm_led   = machine.Pin( 3, machine.Pin.OUT, machine.Pin.PULL_DOWN)
-reset       = machine.Pin(13, machine.Pin.OUT, machine.Pin.PULL_DOWN)
-pwr_reset   = machine.Pin(14, machine.Pin.OUT, machine.Pin.PULL_DOWN)
-psm_eint    = machine.Pin(15, machine.Pin.OUT, machine.Pin.PULL_UP)
-pico_led    = machine.Pin(25, machine.Pin.OUT)
+water_alarm = machine.Pin( 2, machine.Pin.IN, machine.Pin.PULL_UP)      # Trigger IRQ
+alarm_led   = machine.Pin( 3, machine.Pin.OUT, machine.Pin.PULL_DOWN)   # LED on the modem board
+reset       = machine.Pin(13, machine.Pin.OUT, machine.Pin.PULL_DOWN)   # Resets the modem board
+pwr_reset   = machine.Pin(14, machine.Pin.OUT, machine.Pin.PULL_DOWN)   # Power reset: Don't use
+psm_eint    = machine.Pin(15, machine.Pin.OUT, machine.Pin.PULL_UP)     # Wakes up the modem in PSM mode
+pico_led    = machine.Pin(25, machine.Pin.OUT)                          # Green LED on the pico
 
 # The current state of the modem
 RESET           = 1
@@ -48,7 +48,7 @@ def callback(p):
         print(f'Alarm: {water_alarm.value()}')
         alarm_set = True
 
-        # Trigger the modem to wake up
+        # Trigger the modem to wake up from PSM
         psm_eint.value(0)
         time.sleep(1)
         psm_eint.value(1)
@@ -87,12 +87,11 @@ class MQTTClient:
     ccid = None
     clock = time_str()
     state = RESET
-    tcp_id = 0
     battery = None
-
     ip_address = ""
     _last_command = None
 
+    # Defined call back handlers
     _connect_handler = None
     _subscribe_handler = None
     _disconnect_handler = None
@@ -117,38 +116,44 @@ class MQTTClient:
         pwr_reset.value(0)
         reset.value(0)
         self.state = RESET
+        await self.wait_for(READY)
 
-    def reset(self):
+    async def reset(self):
         """
         Reset the modem without powering down.
         """
         reset.value(1)
-        time.sleep_ms(1000)
+        time.sleep_ms(100)
         reset.value(0)
-        time.sleep_ms(1000)
+        time.sleep_ms(100)
         self.state = RESET
+        await self.wait_for(READY)
 
     async def network(self, psm=False):
         """
         Make sure there is a network connection to NB-IOT cellular network
         :param psm: POWER SAVING MODE, do not use for MQTT.
-        :return:
+        :return: True when done
         """
         self.at('qccid')
 
         if not psm:
-            self.at('qsclk=0') 							# Turn off PSM
+            self.at('qsclk=0') 							# Turn off PSM, It must be off for MQTT
+            await asyncio.sleep_ms(100)
+            
         else:
             self.at('qnbiotevent=1,1')  				# Report PSM events
             self.at('cpsms=1,,,"00101100","00100001"')  # Set PSM 12 hours, 1 min active
             self.at('qsclk=1')
 
-
+        # Wait to read the CEREG value to know we are connected to the network
         while not self.state == REGISTERED:
             self.at('cereg?')
-            await asyncio.sleep_ms(1000)
+            self.at('csq')
+            await asyncio.sleep_ms(2000)
 
         await asyncio.sleep(1)
+        return True
 
     def CEREG(self, result):
         """
@@ -173,6 +178,7 @@ class MQTTClient:
         except ValueError as e:
             print(f"ValueError:{e} for CEREG:{result}")
 
+    # All capital letter functions are read returns from the modem e.g. +QCCID:
     def QCCID(self, result):
         """
         Get the ccid +QCCID: 89882280666027595366\r\n'
@@ -258,7 +264,6 @@ class MQTTClient:
         result = result.split(',')
         if self._publish_handler:
             self._publish_handler(result)
-            
 
     def QMTRECV(self, result):
         """
@@ -288,10 +293,10 @@ class MQTTClient:
         except:
             self.battery  = result[0].replace('\r\n', '').strip()
 
-
     def CCLK(self, result):
         """
         Get current time from network '+CCLK: 24/02/19,14:57:04-20\r\n'
+        For some strange reason Quectel split timeszone up by 4 so -20 is really -5
         :param result: What is left after the command
         Get the current clock time from the network eg. b'+CCLK: 2023/03/09,14:02:31GMT-5\r\n'
         """
@@ -329,6 +334,7 @@ class MQTTClient:
     def at(self, command):
         """
         Send the command and precede with +AT and end with cr nl
+        This command justs sends the command, it does not know if there was an error or not.
         :param command: command string to send to modem
         :return: None
         """
@@ -342,8 +348,9 @@ class MQTTClient:
     async def reader(self):
         """
         This is the main task that reads everything coming from the modem. It changes the state as
-        needed, and should run as long as the modem is up.
-        :return:
+        needed, and should run as long as the modem is up. It will call the appropriate function for all
+        command returns beginning with a plus sign
+        :return: Never
         """
         while True:
             if modem.any():
@@ -359,10 +366,12 @@ class MQTTClient:
                 if 'OK' in data or 'ERROR' in data:
                     continue
 
+                # On a reboot or press the reset button on the modem will return RDY
                 if 'RDY' in data:
+                    print("Ready")
                     self.state = READY
 
-                # If the modem is expecting to read some it will send the prompt >
+                # If the modem is expecting to read some data it will send the prompt >
                 elif '>' in data:
                     self.state = READING
 
@@ -395,11 +404,12 @@ class MQTTClient:
             if self.state == state:
                 return True
 
+            # You can force the query of a state by sending commands to return a state e.g. AT+CEREG?
             if query:
                 self.at(query)
-                time.sleep(2)
+                # await asyncio.sleep(2)      # Give up to CPU so it can be read
 
-            await asyncio.sleep_ms(1000)
+            await asyncio.sleep_ms(2000)
 
     async def send_cert(self, current_state, cert_file):
         """
@@ -416,7 +426,7 @@ class MQTTClient:
                 time.sleep_ms(100)
         print(f"wrote {size} bytes for cert")
 
-        # Cntrl Z indicates that its done writing
+        # Cntrl Z indicates to the modem that we are done writing data
         modem.write(bytes([26]))
 
         # Restore the previous state
@@ -424,8 +434,8 @@ class MQTTClient:
 
     async def ssl(self):
         """
-        Set up the ssl parmeters to connect to AWS
-        :return:
+        Set up the ssl parameters to connect to AWS
+        :return: True
         """
         self.at('qsslcfg=0,0,"sslversion",4')
         self.at('qsslcfg=0,0,"seclevel",2')  # Set security to client cert (1 server cert required)
@@ -440,7 +450,7 @@ class MQTTClient:
         await self.send_cert(self.state, clientkey)
 
         self.at('qmtcfg="ssl",0,1,0,0')  # Turn on SSL for MQTT
-        return
+        return True
 
     async def open(self):
         """
@@ -462,6 +472,7 @@ class MQTTClient:
         command = f'qmtconn={self.tcp_id},"{self.ccid}"'  # Connect to MQTT broker
         self.at(command)
         await self.wait_for(MQTTCONNECTED, 'qmtconn?')
+        return True
 
     def publish(self, topic, message):
         """
@@ -484,16 +495,17 @@ class MQTTClient:
         # Restore the previous state
         self.state = current_state
 
-    def report(self):
+    async def report(self):
         """
         Report current state
         :return:
         """
         self.at('cbc')  # Get the battery level
-        time.sleep(1)
-
         self.at('cclk?')
-        time.sleep(1)
+        
+        while not self.battery:
+            await asyncio.sleep_ms(100)
+            
         msg = json.dumps({'ccid': self.ccid,
                           'alarm': True if water_alarm.value() == 0 else False,
                           'temperature': temperature(),

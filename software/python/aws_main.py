@@ -3,7 +3,7 @@ import json
 import utime
 import machine
 
-from config import host, cacert, clientkey, clientcert
+from async.config  import host, cacert, clientkey, clientcert
 
 # import _thread
 
