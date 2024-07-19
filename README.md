@@ -37,7 +37,9 @@ such as water alarm detector, where there is no WIFI available, or monitoring an
 
 5. ##### Low cost 
    The cost of the Watchible board is very low due to the low cost of the Quectel BC66 family of modem, which are specifically
-   designed for NB-IOT. Cellular plans are available that are as low $10.00 for 10 years. 
+   designed for NB-IOT. Cellular plans are available that are as low $10.00 for 10 years.
+
+You can buy the boards here: https://www.pcbway.com/project/shareproject/Watchible_NB_IOT_board_577fd496.html
 
 
 
