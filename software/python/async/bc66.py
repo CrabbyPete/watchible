@@ -29,9 +29,35 @@ MQTTCONNECTED   = 8
 MQTTCONNECTING  = 9
 MQTTDISCONNECT  = 10
 
+PSM_SLEEP: int = 43200  	# 21600=6 hours 43200=12 hours
+MONITOR = False
 
 last_alarm = None
 alarm_set = False
+
+def logger(s):
+    debug.write(s+'\r\n')
+
+
+def no_print(s):
+    """
+    Use this when live to prevent any writing
+    :param s:
+    :return:
+    """
+    return
+
+
+def logfile(s):
+    print(s)
+    with open("log.txt","a") as fd:
+        fd.write(s+'\r\n')
+
+if MONITOR:
+    debug = machine.UART(0, 115200, tx=machine.Pin(0), rx=machine.Pin(1))
+    log = logger
+else:
+    log = logfile
 
 
 def callback(p):
@@ -45,7 +71,7 @@ def callback(p):
 
     # Check to see it the alarm has gone off already in the last hour
     if not last_alarm or now - last_alarm > 3600:
-        print(f'Alarm: {water_alarm.value()}')
+        log(f'Alarm: {water_alarm.value()}')
         alarm_set = True
 
         # Trigger the modem to wake up from PSM
@@ -83,6 +109,8 @@ def temperature():
 
 
 class MQTTClient:
+
+    psm = False
     tcp_id = 0
     ccid = None
     clock = time_str()
@@ -129,30 +157,27 @@ class MQTTClient:
         self.state = RESET
         await self.wait_for(READY)
 
-    async def network(self, psm=False):
+    async def network_ready(self, timeout=None):
         """
         Make sure there is a network connection to NB-IOT cellular network
         :param psm: POWER SAVING MODE, do not use for MQTT.
         :return: True when done
         """
-        self.at('qccid')
+        self.at('cereg=1')
+        await asyncio.sleep_ms(10)
+        now = time.time()
+        while True:
+            if self.state == REGISTERED:
+                break
 
-        if not psm:
-            self.at('qsclk=0') 							# Turn off PSM, It must be off for MQTT
-            await asyncio.sleep_ms(100)
-            
-        else:
-            self.at('qnbiotevent=1,1')  				# Report PSM events
-            self.at('cpsms=1,,,"00101100","00100001"')  # Set PSM 12 hours, 1 min active
-            self.at('qsclk=1')
+            self.at("cereg?")
+            await asyncio.sleep_ms(10)
+            if timeout:
+                t = now - time.time()
+                if t > timeout:
+                    return False
+            time.sleep(1)
 
-        # Wait to read the CEREG value to know we are connected to the network
-        while not self.state == REGISTERED:
-            self.at('cereg?')
-            self.at('csq')
-            await asyncio.sleep_ms(2000)
-
-        await asyncio.sleep(1)
         return True
 
     def CEREG(self, result):
@@ -176,7 +201,7 @@ class MQTTClient:
                     self.state = REGISTERED
 
         except ValueError as e:
-            print(f"ValueError:{e} for CEREG:{result}")
+            log(f"ValueError:{e} for CEREG:{result}")
 
     # All capital letter functions are read returns from the modem e.g. +QCCID:
     def QCCID(self, result):
@@ -197,13 +222,13 @@ class MQTTClient:
         try:
             if int(result[1]) == 0:
                 self.state = MQTTOPENED
-                print("Opened MQTT")
+                log("Opened MQTT")
             else:
                 self.state = MQTTNOTOPENED
-                print("Failed to open MQTT")
+                log("Failed to open MQTT")
 
         except ValueError as e:
-            print(f"ValueError:{e} for QMTOPEN:{result}")
+            log(f"ValueError:{e} for QMTOPEN:{result}")
 
     def MQTSTAT(self, result):
         """
@@ -212,11 +237,11 @@ class MQTTClient:
         :return:
         """
         result = result.split(',')
-        print(f"MQTT connection closed {result}")
+        log(f"MQTT connection closed {result}")
         try:
             if int(result[1]) > 0:
                 self.state = MQTTCLOSED
-                print("MQTT connecion closed")
+                log("MQTT connecion closed")
                 if self._disconnect_handler:
                     self._disconnect_handler(result)
 
@@ -224,7 +249,7 @@ class MQTTClient:
                 self._connect_handler(result)
 
         except ValueError as e:
-            print(f"ValueError:{e} for QMTSTAT:{result}")
+            log(f"ValueError:{e} for QMTSTAT:{result}")
 
     def QMTCLOSE(self, result):
         """
@@ -246,17 +271,17 @@ class MQTTClient:
         try:
             if int(result[1]) == 3:
                 self.state = MQTTCONNECTED
-                #print(f"MQTT connected")
+                #log(f"MQTT connected")
                 if self._connect_handler:
                     self._connect_handler(result)
 
             elif int(result[1]) in (1, 2):
                 self.state = MQTTCONNECTING
-                #print(f"MQTT connecting")
+                #log(f"MQTT connecting")
 
         except ValueError as e:
-            print(f"ValueError:{e} for QMTCONN:{result}")
-    
+            log(f"ValueError:{e} for QMTCONN:{result}")
+
     def QMTPUB(self, result):
         """
         Result of a publish command e.g. +QMTPUB: 0,0,0\r\n'
@@ -274,13 +299,13 @@ class MQTTClient:
         try:
             result = result.split(',')
             line = result[3]
-            print(line)
+            log(line)
         except ValueError as e:
-            print(f"ValueError:{e} for QMTRECV:{result}")
+            log(f"ValueError:{e} for QMTRECV:{result}")
 
         if self._subscribe_handler:
             self._subscribe_handler(result)
-    
+
     def CBC(self, result):
         """
         # Get the current battery level eg. +CBC: 0,0,3275 Battery level
@@ -355,11 +380,11 @@ class MQTTClient:
         while True:
             if modem.any():
                 data = modem.readline()
-                print(data)
+                log(data)
                 try:
                     data = data.decode('utf-8', 'ignore')
                 except Exception as e:
-                    print(f"Error:{str(e)} reading data")
+                    # log(f"Error:{str(e)} reading data")
                     continue
 
                 # Response to the last command
@@ -368,7 +393,7 @@ class MQTTClient:
 
                 # On a reboot or press the reset button on the modem will return RDY
                 if 'RDY' in data:
-                    print("Ready")
+                    log("Ready")
                     self.state = READY
 
                 # If the modem is expecting to read some data it will send the prompt >
@@ -381,18 +406,18 @@ class MQTTClient:
                     try:
                         status, result = data.split(':', 1)
                     except ValueError as e:
-                        print(f"Error:{str(e)} for {data}")
+                        log(f"Error:{str(e)} for {data}")
                         status = data
 
                     status = status.replace('+', '').strip()
                     if hasattr(self, status):
                         func = getattr(self, status)
                         func(result)
-                    
+
             else:
                 await asyncio.sleep_ms(1000)
 
-    async def wait_for(self, state, query=None, timeout=None):
+    async def wait_for(self, state, query=None, timeout:int=0):
         """
         Wait for a particular state
         :param state: The state you need to wait for
@@ -400,16 +425,23 @@ class MQTTClient:
         :param timeout: optional timeout
         :return: True when state happens (note, could add a timeout )
         """
+        if timeout:
+            stop = time.time() + timeout
+            
         while True:
             if self.state == state:
                 return True
+
+            if timeout:
+                if time.time() >= stop:
+                    return False
 
             # You can force the query of a state by sending commands to return a state e.g. AT+CEREG?
             if query:
                 self.at(query)
                 # await asyncio.sleep(2)      # Give up to CPU so it can be read
 
-            await asyncio.sleep_ms(2000)
+            await asyncio.sleep_ms(1000)
 
     async def send_cert(self, current_state, cert_file):
         """
@@ -423,8 +455,7 @@ class MQTTClient:
             size = 0
             for line in f.readlines():
                 size += modem.write(line)
-                time.sleep_ms(100)
-        print(f"wrote {size} bytes for cert")
+                time.sleep_ms(10)
 
         # Cntrl Z indicates to the modem that we are done writing data
         modem.write(bytes([26]))
@@ -459,7 +490,8 @@ class MQTTClient:
         """
         command = f'qmtopen={self.tcp_id},"{host}",{port}'  # Open the MQTT broker
         self.at(command)
-        await self.wait_for(MQTTOPENED)
+        ok = await self.wait_for(MQTTOPENED, None, 30)
+        return ok
 
     async def connect(self):
         """
@@ -471,7 +503,7 @@ class MQTTClient:
 
         command = f'qmtconn={self.tcp_id},"{self.ccid}"'  # Connect to MQTT broker
         self.at(command)
-        await self.wait_for(MQTTCONNECTED, 'qmtconn?')
+        ok = await self.wait_for(MQTTCONNECTED, 'qmtconn?', 30)
         return True
 
     def publish(self, topic, message):
@@ -502,10 +534,10 @@ class MQTTClient:
         """
         self.at('cbc')  # Get the battery level
         self.at('cclk?')
-        
+
         while not self.battery:
             await asyncio.sleep_ms(100)
-            
+
         msg = json.dumps({'ccid': self.ccid,
                           'alarm': True if water_alarm.value() == 0 else False,
                           'temperature': temperature(),

@@ -55,11 +55,10 @@ async def main(client):
     while True:
         await client.network_ready()
         commands = [
-            'qsclk=0',  # Turn off PSM while we send commands
-            'qledmode=0',  # Turn off LED on network
-            'cedrxs=0',  # Turn off DRX
-            'qnbiotevent=1,1',  # Report PSM events
-            # 'cpsms=1,,,"00101100","00000001"',    # PSM Mode. Wake for 2 seconds, sleep 12 hours 1, 6 hours
+            'qsclk=0',                  # Turn off PSM while we send commands
+            'qledmode=0',               # Turn off LED on network
+            'cedrxs=0',                 # Turn off DRX
+            'qnbiotevent=1,1',          # Report PSM events
             f'qpsms=0,{PSM_SLEEP}',
             'cclk?',  # Get the time
             'qccid',  # Get the ccid
@@ -82,15 +81,13 @@ async def main(client):
         now = time.time() + PSM_SLEEP
         hours = 1
 
-        client.at('qsclk=1')   # Turn on PSM
-        while True:
-            if client.psm:
-                break
+        client.at('qsclk=1')   # Turn on PSM and wait for the PSM message
+        while not client.psm:
             await asyncio.sleep_ms(100)
-
 
         while client.psm:
             log("sleep @{}".format(time_str()))
+            time.sleep(1)
             # time.sleep(60*60)
             machine.lightsleep(3600000)  # Sleep for an hour at a clip an interrupt will cause it to wake
             if client.alarm_set():
