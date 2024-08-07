@@ -5,7 +5,7 @@ NB-IOT.  The advantage of NB-IOT is that it is very low cost, and and can be ver
 It is meant to monitor any trigger with a low impedance interface. This is useful if in an applications
 such as water alarm detector, where there is no WIFI available, or monitoring an alarm in a remote location or field. 
 
-![Watchible boards ](http:./img.png)
+![Watchible boards ](http:./watchible_boards.png)
 
 ### Features:
 
