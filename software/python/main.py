@@ -9,7 +9,6 @@ import machine
 import _thread
 
 
-
 MONITOR: bool   = False
 PSM_SLEEP       = 21600   # 21600=6 hours 43200=12 hours
 HOURS_SLEEP     = 6
@@ -607,7 +606,6 @@ class BC66:
         :param connect_id:
         :return:
         """
-
         global ccid
 
         tcp_id = 1
@@ -615,11 +613,11 @@ class BC66:
 
         # Open the MQTT broker
         self.send_at(f'qmtopen={tcp_id},"{host}",{port}')
-        for _ in range(30):
+        for _ in range(120):
             s = get_state()
             if s in (MQTTOPENED, MQTTNOTOPENED):
                 break
-            time.sleep_ms(1000)
+            time.sleep_ms(2000)
         else:
             return False
 
@@ -629,12 +627,12 @@ class BC66:
         else:
             return False
 
-        for _ in range(30):
+        for _ in range(120):
             s = get_state()
             if s in (MQTTCONNECTED, MQTTCLOSED):
                 break
             self.send_at('QMTCONN?')
-            time.sleep_ms(1000)
+            time.sleep_ms(2000)
 
         if s == MQTTCONNECTED:
             return True
@@ -650,7 +648,7 @@ class BC66:
         if get_state() == MQTTCONNECTED:
             self.send_at(f'qmtsub=1,1,"{topic}",0')
 
-    def publish(self):
+    def publish(self, wake_ups):
         """
         MQTT publish the current status
         :return:
@@ -663,7 +661,8 @@ class BC66:
                           'alarm': alarm_set,
                           'temperature': temperature(),
                           'volts': volts,
-                          'timestamp': clock})
+                          'timestamp': clock,
+                          'wakes':str(wake_ups)})
 
         current_state = get_state()
         self.send_at('qmtpub=1,0,0,0,"device/state"'.format(msg))
@@ -717,15 +716,18 @@ def main():
         bc66.send_at(command)
 
     # Loop forever
+    wake_ups = 0  # Keep track how many times you wake so you can see a reboot
     while True:
+        wake_ups += 1
         bc66.network_ready()
         pico_led.on()
         commands = [
-            #'qsclk=0',							 # Turn off PSM while we send commands
+            'qsclk=0',							 # Turn off PSM while we send commands
             'cclk?',                             # Get the time
             'cbc',                               # Get the battery level
             'qccid',
-            'qpsms?'
+            'qpsms?',
+            'qmtcfg="timeout",1,30,10,1'
         ]
         for command in commands:
             bc66.send_at(command)
@@ -733,10 +735,12 @@ def main():
         #bc66.certificate(1)
         ok = bc66.mqtt(config.host, config.port, context_id, connect_id)
         if ok:
-            bc66.publish()
-            bc66.close()
+            bc66.publish(wake_ups)
+        else:
+            log("MQTT Failed")
+        bc66.close()
 
-        bc66.send_at('qsclk=1') # Turn PSM back on
+        #bc66.send_at('qsclk=1') # Turn PSM back on
 
         # Wait to enter PSM
         while True:
@@ -765,16 +769,12 @@ def main():
                 break
 
         log(f"wake up @{time_str()}")
-        bc66.state = RESET
+        set_state(RESET)
 
 
 if __name__ == '__main__':
     while True:
         try:
-            
             main()
         except Exception as e:
             log(f"Error:{e} in main")
-        else:
-            log("Restart")
-
